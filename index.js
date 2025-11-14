@@ -66,7 +66,6 @@ const E = { ok: "✅", warn: "⚠️", critical: "🚨", info: "ℹ️", heart: 
 
 // bot + express
 const bot = new Bot(TELEGRAM_TOKEN);
-const app = express();
 
 // START welcome (professional & emotional)
 bot.command("start", async (ctx) => {
