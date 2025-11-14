@@ -10,13 +10,12 @@ const express = require("express");
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const TELEGRAM_TOKEN = process.env.8327472085:AAHyc53ssTK_JLV14qxVtcm7_lFBzFGvJI8
-;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
-  console.error("8327472085:AAHyc53ssTK_JLV14qxVtcm7_lFBzFGvJI8
-");
+  console.error("Please set TELEGRAM_TOKEN env var.");
   process.exit(1);
 }
+
 
 const DB_FILE = path.join(__dirname, "db.json");
 
