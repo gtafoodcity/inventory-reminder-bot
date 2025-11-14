@@ -1,0 +1,40 @@
+{
+  "lastSent": {},
+  "partners": [
+    {
+      "id": "PUT_YOUR_ID_HERE",
+      "name": "Owner (India)",
+      "tz": "Asia/Kolkata"
+    }
+  ],
+  "schedules": [
+    {
+      "id": "oil",
+      "label": "Oil",
+      "intervalDays": 1,
+      "time": "09:00",
+      "message": "Check oil stock — expected usage today: 5 packets."
+    },
+    {
+      "id": "vegetables",
+      "label": "Vegetables",
+      "intervalDays": 1,
+      "time": "20:00",
+      "message": "Send vegetables list for tomorrow."
+    },
+    {
+      "id": "rice",
+      "label": "Rice",
+      "intervalDays": 2,
+      "time": "09:00",
+      "message": "Check rice stock — order if low."
+    },
+    {
+      "id": "gas",
+      "label": "Gas Cylinder",
+      "intervalDays": 4,
+      "time": "09:00",
+      "message": "Check gas cylinder status — may need replacement soon."
+    }
+  ]
+}
