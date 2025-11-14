@@ -1,50 +1,39 @@
 {
   "lastSent": {},
   "partners": [
-    { "id": "8331001410", "name": "Teja (Owner)", "role": "owner", "tz": "Asia/Kolkata" }
+    { "id": "8331001410", "name": "Teja", "role": "owner", "tz": "Asia/Kolkata" }
   ],
   "schedules": [
-    {
-      "id": "vegetables",
-      "label": "Vegetables Confirmation",
-      "intervalDays": 1,
-      "time": "23:30",
-      "message": "Did you share the vegetable list for tomorrow? (Please confirm)"
-    },
-    {
-      "id": "oil",
-      "label": "Oil Check",
-      "intervalDays": 1,
-      "time": "09:00",
-      "message": "Check oil stock — update if low."
-    }
+    { "id": "vegetables", "label": "Vegetables Confirmation", "intervalDays": 1, "time": "23:30", "message": "Did you share the vegetable list for tomorrow? (Please confirm)" },
+    { "id": "oil", "label": "Oil Check", "intervalDays": 1, "time": "09:00", "message": "Check oil stock — update if low." }
   ],
   "pendingConfirmations": {},
   "inventory": [
+    { "id": "oil_pkg", "name": "Cooking Oil (packet)", "stock": 50, "unit": "packets", "dailyUsage": 5, "warnDays": 4, "criticalDays": 2, "lastUpdated": null }
+  ],
+  "reminders": [],
+  "reminderHistory": [],
+  "staff": [
     {
-      "id": "oil_pkg",
-      "name": "Cooking Oil (packet)",
-      "stock": 50,
-      "unit": "packets",
-      "dailyUsage": 5,
-      "warnDays": 4,
-      "criticalDays": 2,
-      "lastUpdated": null
+      "id": "8331001410",
+      "name": "Teja",
+      "role": "owner",
+      "tz": "Asia/Kolkata",
+      "salaryType": "monthly",
+      "salaryAmount": 0,
+      "payday": 1,
+      "attendance": {}
     }
   ],
+  "payments": [],
   "heartbeats": {},
   "settings": {
-    "vegConfirm": {
-      "confirmTime": "23:30",
-      "followupMinutes1": 30,
-      "followupMinutes2": 60
-    },
-    "inventory": {
-      "checkIntervalMinutes": 60
-    },
-    "heartbeat": {
-      "thresholdMinutes": 10
-    }
+    "vegConfirm": { "confirmTime": "23:30", "followupMinutes1": 30, "followupMinutes2": 60 },
+    "inventory": { "checkIntervalMinutes": 60 },
+    "heartbeat": { "thresholdMinutes": 10 },
+    "attendancePromptTime": "12:00",      // daily attendance prompt time (HH:MM IST)
+    "endOfDayPaymentCheck": "00:05",     // when to ask about daily payments (after day closes)
+    "monthlyReminderDaysBefore": 7       // days before payday to remind monthly payments
   },
   "audit": [],
   "sessions": {}
