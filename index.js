@@ -1,6 +1,5 @@
 // index.js
-// Full bot: inventory, custom reminders, attendance, payroll, inline buttons, emoji UI.
-// IMPORTANT: set TELEGRAM_TOKEN and HEARTBEAT_SECRET in Render env vars.
+// Inventory + Reminders + Attendance + Payroll + Temporary admin session (password-based)
 
 const { Bot, InlineKeyboard } = require("grammy");
 const fs = require("fs");
@@ -52,7 +51,21 @@ function reloadDb() { db = loadDbSync(); }
 
 // helpers
 function logAudit(actor, action, details) { reloadDb(); db.audit = db.audit || []; db.audit.push({ when: dayjs().toISOString(), actor: String(actor), action, details }); writeDbSync(db); }
-function isAdmin(userId) { reloadDb(); const p = db.partners.find(x => String(x.id) === String(userId)); return p && (p.role === "owner" || p.role === "admin"); }
+
+// isAdmin now checks permanent role OR temporary session admin (tempAdmin flag in db.sessions)
+function isAdmin(userId) {
+  reloadDb();
+  // permanent owner/admin in db
+  const p = db.partners.find(x => String(x.id) === String(userId));
+  if (p && (p.role === "owner" || p.role === "admin")) return true;
+
+  // temporary session-based admin (set by /admin command)
+  const sess = db.sessions && db.sessions[String(userId)];
+  if (sess && sess.tempAdmin === true) return true;
+
+  return false;
+}
+
 function findPartner(userId) { reloadDb(); return db.partners.find(x => String(x.id) === String(userId)); }
 function getStaff(userId) { reloadDb(); return db.staff.find(x => String(x.id) === String(userId)); }
 function upsertStaff(userId, name, role = "staff", tz = "Asia/Kolkata") { reloadDb(); let s = db.staff.find(x => String(x.id) === String(userId)); if (s) { s.name = name; s.role = role; s.tz = tz; writeDbSync(db); return s;} s = { id: String(userId), name, role, tz, salaryType: "daily", salaryAmount: 0, payday: 1, attendance: {}, payments: [] }; db.staff.push(s); writeDbSync(db); return s; }
@@ -66,6 +79,7 @@ const E = { ok: "✅", warn: "⚠️", critical: "🚨", info: "ℹ️", heart: 
 
 // bot + express
 const bot = new Bot(TELEGRAM_TOKEN);
+const app = express();
 
 // START welcome (professional & emotional)
 bot.command("start", async (ctx) => {
@@ -74,8 +88,10 @@ bot.command("start", async (ctx) => {
     // ensure staff record exists
     upsertStaff(ctx.from.id, name, findPartner(ctx.from.id)?.role || "staff", findPartner(ctx.from.id)?.tz || "Asia/Kolkata");
     const partner = findPartner(ctx.from.id);
-    const roleText = partner ? `*Role:* ${partner.role.toUpperCase()} ${partner.role === "owner" ? E.heart : ""}` : "*Role:* staff";
-    const msg = `${E.heart} Hello *${name}* — Welcome to *GTA Food City Assistant*.\n\n${roleText}\n${E.info} I keep our kitchen calm and the team confident: veg confirmations, inventory alerts, attendance & payroll reminders, and custom reminders.\n\nTap below to begin.`;
+    const sess = db.sessions && db.sessions[String(ctx.from.id)];
+    const tmpAdminTag = sess && sess.tempAdmin ? " (TEMP ADMIN)" : "";
+    const roleText = partner ? `*Role:* ${partner.role.toUpperCase()} ${partner.role === "owner" ? E.heart : ""}${tmpAdminTag}` : `*Role:* staff${tmpAdminTag}`;
+    const msg = `${E.heart} Hello *${name}* — Welcome to *GTA Food City Assistant*.\n\n${roleText}\n${E.info} I keep the kitchen calm and the team confident: veg confirmations, inventory alerts, attendance & payroll reminders, and custom reminders.\n\nTap below to begin.`;
     const kb = new InlineKeyboard()
       .text("How it works", "start:how")
       .text("Commands", "start:commands")
@@ -87,6 +103,38 @@ bot.command("start", async (ctx) => {
     await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
     logAudit(ctx.from.id, "start", `${ctx.from.id}`);
   } catch (e) { console.error("start error", e.message); }
+});
+
+// /whoami shows permanent role and temporary admin state
+bot.command("whoami", ctx => {
+  const id = String(ctx.chat.id);
+  reloadDb();
+  const partner = db.partners.find(p => String(p.id) === id);
+  const staff = db.staff.find(s => String(s.id) === id);
+  const baseRole = partner?.role || staff?.role || "staff";
+  const sess = db.sessions && db.sessions[id];
+  const tmp = sess && sess.tempAdmin ? " (TEMP ADMIN)" : "";
+  ctx.reply(`${id}\nRole: ${baseRole}${tmp}`);
+});
+
+// /admin - temporary admin flow (password: 7201)
+bot.command("admin", async (ctx) => {
+  setSession(ctx.from.id, { action: "admin_login", step: 1 });
+  await ctx.reply("Enter admin password:");
+});
+
+// /logout - drop temporary admin
+bot.command("logout", async (ctx) => {
+  reloadDb();
+  if (db.sessions && db.sessions[String(ctx.from.id)] && db.sessions[String(ctx.from.id)].tempAdmin) {
+    delete db.sessions[String(ctx.from.id)].tempAdmin;
+    delete db.sessions[String(ctx.from.id)].tempAdminSince;
+    writeDbSync(db);
+    await ctx.reply("✅ Logged out of temporary admin — you are back to your normal role.");
+    logAudit(ctx.from.id, "temp_admin_revoked", `${ctx.from.id}`);
+    return;
+  }
+  await ctx.reply("You were not in temporary admin mode.");
 });
 
 // callback handler for start buttons, veg and payroll/attendance/pay buttons
@@ -104,7 +152,23 @@ bot.on("callback_query:data", async (ctx, next) => {
       }
       if (action === "commands") {
         const cmds =
-`${E.file} *Commands (interactive & simple)*\n\n${E.person} /whoami\n${E.package} /additem — interactive\n${E.package} /purchase — interactive\n${E.package} /setusage — interactive\n${E.package} /inventory\n${E.calendar} /addreminder — interactive\n${E.calendar} /myreminders\n${E.clock} /clockin\n${E.clock} /clockout\n${E.calendar} /attendance <id> — admin view\n${E.money} /setsalary <id> <daily|monthly> <amount> [payday]\n${E.money} /pay <id> — mark payment\n${E.group} /addpartner <id> <name> <role>`;
+`${E.file} *Commands (interactive & simple)*
+
+${E.person} /whoami
+${E.package} /additem — interactive
+${E.package} /purchase — interactive
+${E.package} /setusage — interactive
+${E.package} /inventory
+${E.calendar} /addreminder — interactive
+${E.calendar} /myreminders
+${E.clock} /clockin
+${E.clock} /clockout
+${E.calendar} /attendance <id> — admin view
+${E.money} /setsalary <id> <daily|monthly> <amount> [payday]
+${E.money} /pay <id> — mark payment
+${E.group} /addpartner <id> <name> <role>
+${E.info} /admin — get temporary admin (password)
+${E.info} /logout — leave temporary admin`;
         await ctx.api.sendMessage(ctx.from.id, cmds, { parse_mode: "Markdown" });
         await ctx.answerCallbackQuery({ text: "Commands sent." });
         return;
@@ -166,7 +230,6 @@ bot.on("callback_query:data", async (ctx, next) => {
       const staff = db.staff.find(s => String(s.id) === String(staffId));
       if (!staff) { await ctx.answerCallbackQuery({ text: "Staff not found." }); return; }
       if (action === "yes") {
-        // record full payment for today (or last pay period)
         const when = dayjs().toISOString();
         const amount = staff.salaryAmount || 0;
         db.payments = db.payments || [];
@@ -177,13 +240,11 @@ bot.on("callback_query:data", async (ctx, next) => {
         logAudit(actor, "pay_full", `${staffId}|${amount}`);
         return;
       } else if (action === "partial") {
-        // ask actor to enter amount — start a small session
         setSession(actor, { action: "pay_partial", step: 1, temp: { staffId } });
         await ctx.api.sendMessage(actor, `Enter partial paid amount for ${staff.name} (number):`);
         await ctx.answerCallbackQuery({ text: "Enter partial amount in chat." });
         return;
       } else if (action === "no") {
-        // record unpaid
         db.payments = db.payments || [];
         db.payments.push({ staffId: String(staffId), amount: 0, when: dayjs().toISOString(), recordedBy: actor, note: "Not paid", type: staff.salaryType });
         writeDbSync(db);
@@ -214,14 +275,12 @@ bot.on("callback_query:data", async (ctx, next) => {
       return;
     }
 
-    // pass through
     return next();
 
   } catch (err) { console.error("callback handler err", err); }
 });
 
 // Commands & interactive session flows
-bot.command("whoami", ctx => ctx.reply(String(ctx.chat.id)));
 bot.command("cancel", ctx => { clearSession(ctx.from.id); ctx.reply(`${E.cancel} Cancelled.`); });
 
 // addpartner / removepartner
@@ -250,7 +309,7 @@ bot.command("removepartner", async ctx => {
   ctx.reply(`Removed partner ${removed.name} (${removed.id}).`);
 });
 
-// Interactive additem / purchase / setusage flows (same as before but preserved)
+// Interactive additem / purchase / setusage flows
 bot.command("additem", async ctx => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Only owners/admins.");
   setSession(ctx.from.id, { action: "additem", step: 1, temp: {} });
@@ -304,7 +363,6 @@ bot.command("pay", async ctx => {
   reloadDb();
   const s = db.staff.find(x => String(x.id) === String(id));
   if (!s) return ctx.reply("Staff not found.");
-  // send inline buttons: Paid / Partial / Not Paid
   const kb = new InlineKeyboard().text(`${E.ok} Paid`, `pay:${id}:yes`).text(`${E.partial} Partial`, `pay:${id}:partial`).row().text(`${E.warn} Not Paid`, `pay:${id}:no`);
   await ctx.reply(`${E.money} Mark payment for ${s.name} (type: ${s.salaryType}, amount: ${s.salaryAmount})`, { reply_markup: kb });
 });
@@ -365,14 +423,34 @@ bot.command("myreminders", async ctx => {
   ctx.reply(lines.join("\n"));
 });
 
-// message handler for interactive sessions (additem/purchase/setusage/addreminder and partial payment)
+// message handler for interactive sessions (including admin_login and pay_partial)
 bot.on("message", async (ctx, next) => {
   try {
     const text = (ctx.message.text || "").trim();
     const session = getSession(ctx.from.id);
-    if (!session) return next();
+
+    // If there is a session and it's admin_login — handle password
+    if (session && session.action === "admin_login") {
+      const entered = text.trim();
+      clearSession(ctx.from.id); // consume session input
+      if (entered === "7201") {
+        reloadDb();
+        db.sessions = db.sessions || {};
+        db.sessions[String(ctx.from.id)] = db.sessions[String(ctx.from.id)] || {};
+        db.sessions[String(ctx.from.id)].tempAdmin = true;
+        db.sessions[String(ctx.from.id)].tempAdminSince = dayjs().toISOString();
+        writeDbSync(db);
+        await ctx.reply("✅ Admin access granted for this session. Use /logout to drop admin access.");
+        logAudit(ctx.from.id, "temp_admin_granted", `${ctx.from.id}`);
+      } else {
+        await ctx.reply("❌ Incorrect password. Admin access denied.");
+        logAudit(ctx.from.id, "temp_admin_failed", `${ctx.from.id}`);
+      }
+      return;
+    }
+
     // additem flow
-    if (session.action === "additem") {
+    if (session && session.action === "additem") {
       if (session.step === 1) { session.temp.id = text.replace(/\s+/g, "_").toLowerCase(); session.step = 2; setSession(ctx.from.id, session); return ctx.reply("Step 2/4: Enter full name."); }
       if (session.step === 2) { session.temp.name = text; session.step = 3; setSession(ctx.from.id, session); return ctx.reply("Step 3/4: Enter daily usage (number)."); }
       if (session.step === 3) { const d = Number(text); if (isNaN(d)) return ctx.reply("Enter number."); session.temp.dailyUsage = d; session.step = 4; setSession(ctx.from.id, session); return ctx.reply("Step 4/4: Enter stock and unit (e.g. 50 packets)."); }
@@ -380,20 +458,20 @@ bot.on("message", async (ctx, next) => {
     }
 
     // purchase flow
-    if (session.action === "purchase") {
+    if (session && session.action === "purchase") {
       if (session.step === 1) { session.temp.id = text; session.step = 2; setSession(ctx.from.id, session); return ctx.reply("Step 2/3: Enter quantity (number)."); }
       if (session.step === 2) { const q = Number(text); if (isNaN(q)) return ctx.reply("Enter number."); session.temp.qty = q; session.step = 3; setSession(ctx.from.id, session); return ctx.reply("Step 3/3: Enter unit or 'same'."); }
       if (session.step === 3) { const unit = text === "same" ? null : text; reloadDb(); const it = db.inventory.find(x => String(x.id) === String(session.temp.id)); if (!it) { clearSession(ctx.from.id); return ctx.reply("Item not found."); } it.stock = (it.stock || 0) + Number(session.temp.qty); if (unit) it.unit = unit; it.lastUpdated = dayjs().toISOString(); writeDbSync(db); logAudit(ctx.from.id, "purchase", `${it.id}|${session.temp.qty}`); clearSession(ctx.from.id); return ctx.reply(`${E.package} Purchase recorded: +${session.temp.qty} ${it.unit} to ${it.name}. Now ${it.stock} ${it.unit}`); }
     }
 
     // setusage flow
-    if (session.action === "setusage") {
+    if (session && session.action === "setusage") {
       if (session.step === 1) { session.temp.id = text; session.step = 2; setSession(ctx.from.id, session); return ctx.reply("Step 2/2: Enter daily usage (number)."); }
       if (session.step === 2) { const u = Number(text); if (isNaN(u)) return ctx.reply("Enter number."); reloadDb(); const it = db.inventory.find(x => String(x.id) === String(session.temp.id)); if (!it) { clearSession(ctx.from.id); return ctx.reply("Item not found."); } it.dailyUsage = u; it.lastUpdated = dayjs().toISOString(); writeDbSync(db); logAudit(ctx.from.id, "setusage", `${it.id}|${u}`); clearSession(ctx.from.id); return ctx.reply(`${E.package} Daily usage for ${it.name} set to ${u}.`); }
     }
 
     // addreminder flow
-    if (session.action === "addreminder") {
+    if (session && session.action === "addreminder") {
       if (session.step === 1) {
         const who = text.toLowerCase();
         if (who === "me") session.temp.target = String(ctx.from.id);
@@ -423,7 +501,7 @@ bot.on("message", async (ctx, next) => {
     }
 
     // pay_partial session: actor enters amount to record partial payment
-    if (session.action === "pay_partial") {
+    if (session && session.action === "pay_partial") {
       if (session.step === 1) {
         const amt = Number(text);
         if (isNaN(amt)) return ctx.reply("Enter numeric amount.");
@@ -439,28 +517,11 @@ bot.on("message", async (ctx, next) => {
       }
     }
 
-    // fallback
-    return;
+    // if no session matched, fall through to next handlers
+    return next();
   } catch (err) {
     console.error("message handler error:", err); try { await ctx.reply("Error processing. Use /cancel to stop."); } catch(e) {}
   }
-});
-
-// heartbeat endpoint (unchanged)
-const app = express();
-app.get("/heartbeat/:id", (req, res) => {
-  try {
-    const id = String(req.params.id || "unknown");
-    const secret = req.query.secret || "";
-    if (!HEARTBEAT_SECRET || secret !== HEARTBEAT_SECRET) return res.status(403).send("Forbidden");
-    reloadDb();
-    db.heartbeats = db.heartbeats || {};
-    db.heartbeats[id] = db.heartbeats[id] || {};
-    db.heartbeats[id].lastSeen = dayjs().toISOString();
-    db.heartbeats[id].status = "ok";
-    writeDbSync(db);
-    return res.send("OK");
-  } catch (err) { console.error("heartbeat error", err); return res.status(500).send("error"); }
 });
 
 // helper keyboards
@@ -560,7 +621,6 @@ setInterval(async () => {
         else targets = [String(r.target)];
         for (const t of targets) {
           try {
-            // send with inline "Done" button
             const kb = new InlineKeyboard().text(`${E.ok} Done`, `remdone:${r.id}`);
             await bot.api.sendMessage(t, `${E.calendar} *Reminder*\n${r.text}\nAt: ${when.tz("Asia/Kolkata").format("YYYY-MM-DD HH:mm")}`, { parse_mode: "Markdown", reply_markup: kb });
           } catch (e) { console.error("reminder send err", e.message); }
@@ -572,19 +632,16 @@ setInterval(async () => {
     }
     db.reminders = (db.reminders || []).filter(r => !r.done); writeDbSync(db);
 
-    // 4) attendance daily prompt (configured time) -> at attendancePromptTime IST ask for each staff via inline buttons to manager/admin
-    // We'll send attendance prompt to all partners (or could be to managers only)
+    // 4) attendance daily prompt (configured time)
     const attTime = db.settings.attendancePromptTime || "12:00";
     const [attH, attM] = attTime.split(":").map(Number);
     const bizNow = dayjs().tz("Asia/Kolkata");
     if (bizNow.hour() === attH && bizNow.minute() === attM) {
-      // avoid duplicate sends: use lastSent key
       const key = `attendance_prompt__${bizNow.format("YYYY-MM-DD")}`;
       if (!db.lastSent[key]) {
         for (const s of (db.staff || [])) {
           try {
             const kb = attendanceKeyboard(s.id);
-            // send to partners (owners/admins) who manage attendance
             for (const p of db.partners) {
               await bot.api.sendMessage(String(p.id), `${E.clock} Attendance: Did *${s.name}* come to work today?`, { parse_mode: "Markdown", reply_markup: kb });
             }
@@ -594,8 +651,7 @@ setInterval(async () => {
       }
     }
 
-    // 5) payroll reminders
-    // daily check (endOfDayPaymentCheck) — ask: Did you pay this daily staff today? buttons: Paid/Partial/Not paid
+    // 5) payroll reminders - EOD daily checks
     const eod = db.settings.endOfDayPaymentCheck || "00:05";
     const [eodH, eodM] = eod.split(":").map(Number);
     if (bizNow.hour() === eodH && bizNow.minute() === eodM) {
@@ -614,25 +670,19 @@ setInterval(async () => {
       }
     }
 
-    // monthly reminders: 1) daysBefore reminder, 2) payday reminder
+    // monthly reminders
     const mdaysBefore = Number(db.settings.monthlyReminderDaysBefore || 7);
-    // iterate staff with monthly salary
     for (const s of (db.staff || [])) {
       if (s.salaryType === "monthly") {
         const payday = Number(s.payday || 1);
-        const payDateThisMonth = dayjs().tz("Asia/Kolkata").date(payday).startOf("day");
-        // if payday is earlier than today (and month rolling), make sure to use current month
-        let payMoment = payDateThisMonth;
+        let payMoment = dayjs().tz("Asia/Kolkata").date(payday).startOf("day");
         if (payMoment.isBefore(bizNow.startOf("day"))) payMoment = payMoment.add(1, "month");
         const daysUntil = payMoment.diff(bizNow.startOf("day"), "day");
-        // if daysUntil === mdaysBefore -> send reminder (once)
         const keyBefore = `monthly_reminder_before__${s.id}__${payMoment.format("YYYY-MM")}`;
         if (daysUntil === mdaysBefore && !db.lastSent[keyBefore]) {
-          // send to partners
           for (const p of db.partners) await bot.api.sendMessage(String(p.id), `${E.calendar} Reminder: Payday for ${s.name} is in ${mdaysBefore} day(s) on ${payMoment.format("YYYY-MM-DD")}. Amount: ${s.salaryAmount}`);
           db.lastSent[keyBefore] = dayjs().toISOString(); writeDbSync(db);
         }
-        // payday reminder
         const keyPayday = `monthly_reminder_payday__${s.id}__${payMoment.format("YYYY-MM")}`;
         if (bizNow.isSame(payMoment, "day") && !db.lastSent[keyPayday]) {
           for (const p of db.partners) await bot.api.sendMessage(String(p.id), `${E.money} Payday today for ${s.name} — Amount: ${s.salaryAmount}. Mark payment:`, { reply_markup: paymentKeyboard(s.id) });
@@ -681,6 +731,22 @@ bot.on("callback_query:data", async (ctx) => {
       }
     }
   } catch (e) { console.error("remdone cb err", e); }
+});
+
+// heartbeat endpoint
+app.get("/heartbeat/:id", (req, res) => {
+  try {
+    const id = String(req.params.id || "unknown");
+    const secret = req.query.secret || "";
+    if (!HEARTBEAT_SECRET || secret !== HEARTBEAT_SECRET) return res.status(403).send("Forbidden");
+    reloadDb();
+    db.heartbeats = db.heartbeats || {};
+    db.heartbeats[id] = db.heartbeats[id] || {};
+    db.heartbeats[id].lastSeen = dayjs().toISOString();
+    db.heartbeats[id].status = "ok";
+    writeDbSync(db);
+    return res.send("OK");
+  } catch (err) { console.error("heartbeat error", err); return res.status(500).send("error"); }
 });
 
 // Express root
