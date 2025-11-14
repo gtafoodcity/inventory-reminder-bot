@@ -1,7 +1,5 @@
-// index.js (web-service friendly: polling bot + small health endpoint)
+// index.js (web-service friendly, simple file-db using fs)
 const { Bot } = require("grammy");
-const { Low } = require("lowdb");
-const { JSONFile } = require("lowdb/node");
 const fs = require("fs");
 const path = require("path");
 const dayjs = require("dayjs");
@@ -19,20 +17,41 @@ if (!TELEGRAM_TOKEN) {
 }
 
 const DB_FILE = path.join(__dirname, "db.json");
-if (!fs.existsSync(DB_FILE)) {
-  console.error("db.json not found. Create db.json (see README).");
-  process.exit(1);
+
+function loadDbSync() {
+  try {
+    const raw = fs.readFileSync(DB_FILE, "utf8");
+    const data = JSON.parse(raw || "{}");
+    data.lastSent = data.lastSent || {};
+    data.partners = data.partners || [];
+    data.schedules = data.schedules || [];
+    return data;
+  } catch (e) {
+    // If file missing or corrupt, create a default structure
+    const init = { lastSent: {}, partners: [], schedules: [] };
+    try { fs.writeFileSync(DB_FILE, JSON.stringify(init, null, 2)); } catch(err){ /* ignore */ }
+    return init;
+  }
 }
 
-const adapter = new JSONFile(DB_FILE);
-const db = new Low(adapter);
-
-async function initDb() {
-  await db.read();
-  db.data = db.data || { lastSent: {}, partners: [], schedules: [] };
-  await db.write();
+function writeDbSync(db) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    return true;
+  } catch (e) {
+    console.error("Failed writing db.json:", e.message);
+    return false;
+  }
 }
 
+// in-memory DB (kept synced)
+let db = loadDbSync();
+
+function reloadDb() {
+  db = loadDbSync();
+}
+
+// helpers for schedule/time checks
 function parseTimeHHMM(timeStr) {
   const [hh, mm] = (timeStr || "00:00").split(":").map(Number);
   return { hh: hh || 0, mm: mm || 0 };
@@ -46,42 +65,42 @@ function timeMatchesNowForTZ(timeStr, nowTz) {
 function shouldSendForPartner(schedule, partner, nowTz) {
   if (!timeMatchesNowForTZ(schedule.time, nowTz)) return false;
   const key = `${schedule.id}__${partner.id}`;
-  const lastSentIso = db.data.lastSent[key];
+  const lastSentIso = db.lastSent[key];
   if (!lastSentIso) return true;
-  const last = dayjs(lastSentIso).tz(partner.tz);
+  const last = dayjs(lastSentIso).tz(partner.tz || "UTC");
   const diffDays = nowTz.startOf('day').diff(last.startOf('day'), 'day');
   return diffDays >= (schedule.intervalDays || 1);
 }
 
-async function markSentForPartner(scheduleId, partnerId, now) {
+function markSentForPartner(scheduleId, partnerId, now) {
   const key = `${scheduleId}__${partnerId}`;
-  db.data.lastSent[key] = now.toISOString();
-  await db.write();
+  db.lastSent[key] = now.toISOString();
+  writeDbSync(db);
 }
 
 const bot = new Bot(TELEGRAM_TOKEN);
 
-// commands
+// Telegram commands
 bot.command("start", ctx => ctx.reply("Inventory Reminder Bot active. You will receive scheduled alerts."));
 bot.command("whoami", ctx => ctx.reply(`Your chat id: ${ctx.chat.id}`));
-bot.command("schedules", async ctx => {
-  await db.read();
-  const list = db.data.schedules.map(s => `${s.label} (${s.id}) — every ${s.intervalDays} day(s) at ${s.time}`).join("\n");
-  ctx.reply("Current schedules:\n" + list);
+bot.command("schedules", ctx => {
+  reloadDb();
+  const list = (db.schedules || []).map(s => `${s.label} (${s.id}) — every ${s.intervalDays} day(s) at ${s.time}`).join("\n");
+  ctx.reply("Current schedules:\n" + (list || "No schedules found."));
 });
 bot.command("test", async ctx => {
   const parts = ctx.message.text.split(" ");
   if (parts.length < 2) return ctx.reply("Usage: /test <schedule_id>");
   const id = parts[1].trim();
-  await db.read();
-  const s = db.data.schedules.find(x => x.id === id);
+  reloadDb();
+  const s = db.schedules.find(x => x.id === id);
   if (!s) return ctx.reply("Schedule not found: " + id);
-  const targets = db.data.partners.map(p => p.id.toString());
+  const targets = (db.partners || []).map(p => String(p.id));
   const now = dayjs();
   for (const pid of targets) {
     try {
-      const partner = db.data.partners.find(p => String(p.id) === String(pid));
-      const displayTime = now.tz(partner.tz).format("YYYY-MM-DD HH:mm (z)");
+      const partner = db.partners.find(p => String(p.id) === String(pid));
+      const displayTime = now.tz(partner.tz || "UTC").format("YYYY-MM-DD HH:mm (z)");
       const text = `🔔 TEST — ${s.label}\n\n${s.message}\n\nTime for ${partner.name}: ${displayTime}`;
       await bot.api.sendMessage(pid, text);
     } catch (e) {
@@ -92,36 +111,37 @@ bot.command("test", async ctx => {
 });
 bot.command("setschedule", async ctx => {
   const userId = String(ctx.chat.id);
-  await db.read();
-  if (!db.data.partners.find(p => String(p.id) === userId)) return ctx.reply("Not authorized.");
+  reloadDb();
+  if (!db.partners.find(p => String(p.id) === userId)) return ctx.reply("Not authorized.");
   const parts = ctx.message.text.split(" ");
   if (parts.length < 4) return ctx.reply("Usage: /setschedule id intervalDays HH:MM Message...");
   const id = parts[1];
   const intervalDays = parseInt(parts[2], 10) || 1;
   const time = parts[3];
   const message = parts.slice(4).join(" ") || `Check ${id}`;
-  const idx = db.data.schedules.findIndex(s => s.id === id);
+  const idx = db.schedules.findIndex(s => s.id === id);
   if (idx === -1) {
-    db.data.schedules.push({ id, label: id, intervalDays, time, message });
+    db.schedules.push({ id, label: id, intervalDays, time, message });
   } else {
-    db.data.schedules[idx] = { ...db.data.schedules[idx], intervalDays, time, message };
+    db.schedules[idx] = { ...db.schedules[idx], intervalDays, time, message };
   }
-  await db.write();
+  writeDbSync(db);
   ctx.reply(`Schedule set: ${id} every ${intervalDays} days at ${time}`);
 });
 
 (async function main() {
-  await initDb();
+  // ensure DB is loaded
+  reloadDb();
 
-  // start bot (polling)
+  // start bot polling
   bot.start({ onStart: () => console.log("Bot started (polling).") });
 
   // scheduler loop every 30 seconds
   setInterval(async () => {
     try {
-      await db.read();
-      const partners = db.data.partners || [];
-      const schedules = db.data.schedules || [];
+      reloadDb();
+      const partners = db.partners || [];
+      const schedules = db.schedules || [];
       for (const partner of partners) {
         try {
           const partnerTz = partner.tz || "UTC";
@@ -133,7 +153,7 @@ bot.command("setschedule", async ctx => {
                 const istTime = dayjs().tz("Asia/Kolkata").format("YYYY-MM-DD HH:mm (z)");
                 const text = `🔔 *${schedule.label} Reminder*\n\n${schedule.message}\n\n_Local time: ${displayTimeForPartner}_\n_Business IST: ${istTime}_`;
                 await bot.api.sendMessage(String(partner.id), text, { parse_mode: "Markdown" });
-                await markSentForPartner(schedule.id, partner.id, nowTz);
+                markSentForPartner(schedule.id, partner.id, nowTz);
                 console.log(`Sent ${schedule.id} to ${partner.name} (${partner.id}) at ${displayTimeForPartner}`);
               }
             } catch (e) {
