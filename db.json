@@ -46,5 +46,6 @@
       "thresholdMinutes": 10
     }
   },
-  "audit": []
+  "audit": [],
+  "sessions": {}
 }
