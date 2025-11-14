@@ -1,4 +1,4 @@
-// index.js (worker-ready)
+// index.js (web-service friendly: polling bot + small health endpoint)
 const { Bot } = require("grammy");
 const { Low } = require("lowdb");
 const { JSONFile } = require("lowdb/node");
@@ -7,6 +7,7 @@ const path = require("path");
 const dayjs = require("dayjs");
 const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
+const express = require("express");
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -111,7 +112,11 @@ bot.command("setschedule", async ctx => {
 
 (async function main() {
   await initDb();
+
+  // start bot (polling)
   bot.start({ onStart: () => console.log("Bot started (polling).") });
+
+  // scheduler loop every 30 seconds
   setInterval(async () => {
     try {
       await db.read();
@@ -143,4 +148,10 @@ bot.command("setschedule", async ctx => {
       console.error("Scheduler loop error:", err.message);
     }
   }, 30 * 1000);
+
+  // small Express server for health-check (so UptimeRobot can ping the URL)
+  const app = express();
+  app.get("/", (req, res) => res.send("Inventory Reminder Bot running"));
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`HTTP server listening on port ${PORT}`));
 })();
