@@ -1,42 +1,50 @@
 {
   "lastSent": {},
   "partners": [
-    {
-      "id": "8331001410",
-      "name": "Owner (India)",
-      "tz": "Asia/Kolkata"
-    }
-    { "id": "720871874", "name": "Teja (2nd India Account)", "tz": "Asia/Kolkata" }
-
+    { "id": "8331001410", "name": "Teja (Owner)", "role": "owner", "tz": "Asia/Kolkata" }
   ],
   "schedules": [
     {
-      "id": "oil",
-      "label": "Oil",
-      "intervalDays": 1,
-      "time": "09:00",
-      "message": "Check oil stock — expected usage today: 5 packets."
-    },
-    {
       "id": "vegetables",
-      "label": "Vegetables",
+      "label": "Vegetables Confirmation",
       "intervalDays": 1,
-      "time": "20:00",
-      "message": "Send vegetables list for tomorrow."
+      "time": "23:30",
+      "message": "Did you share the vegetable list for tomorrow? (Please confirm)"
     },
     {
-      "id": "rice",
-      "label": "Rice",
-      "intervalDays": 2,
+      "id": "oil",
+      "label": "Oil Check",
+      "intervalDays": 1,
       "time": "09:00",
-      "message": "Check rice stock — order if low."
-    },
-    {
-      "id": "gas",
-      "label": "Gas Cylinder",
-      "intervalDays": 4,
-      "time": "09:00",
-      "message": "Check gas cylinder status — may need replacement soon."
+      "message": "Check oil stock — update if low."
     }
-  ]
+  ],
+  "pendingConfirmations": {},
+  "inventory": [
+    {
+      "id": "oil_pkg",
+      "name": "Cooking Oil (packet)",
+      "stock": 50,
+      "unit": "packets",
+      "dailyUsage": 5,
+      "warnDays": 4,
+      "criticalDays": 2,
+      "lastUpdated": null
+    }
+  ],
+  "heartbeats": {},
+  "settings": {
+    "vegConfirm": {
+      "confirmTime": "23:30",
+      "followupMinutes1": 30,
+      "followupMinutes2": 60
+    },
+    "inventory": {
+      "checkIntervalMinutes": 60
+    },
+    "heartbeat": {
+      "thresholdMinutes": 10
+    }
+  },
+  "audit": []
 }
