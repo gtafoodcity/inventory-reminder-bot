@@ -10,9 +10,11 @@ const express = require("express");
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_TOKEN = process.env.8327472085:AAHyc53ssTK_JLV14qxVtcm7_lFBzFGvJI8
+;
 if (!TELEGRAM_TOKEN) {
-  console.error("Please set TELEGRAM_TOKEN env var.");
+  console.error("8327472085:AAHyc53ssTK_JLV14qxVtcm7_lFBzFGvJI8
+");
   process.exit(1);
 }
 
@@ -27,7 +29,6 @@ function loadDbSync() {
     data.schedules = data.schedules || [];
     return data;
   } catch (e) {
-    // If file missing or corrupt, create a default structure
     const init = { lastSent: {}, partners: [], schedules: [] };
     try { fs.writeFileSync(DB_FILE, JSON.stringify(init, null, 2)); } catch(err){ /* ignore */ }
     return init;
@@ -44,24 +45,17 @@ function writeDbSync(db) {
   }
 }
 
-// in-memory DB (kept synced)
 let db = loadDbSync();
+function reloadDb() { db = loadDbSync(); }
 
-function reloadDb() {
-  db = loadDbSync();
-}
-
-// helpers for schedule/time checks
 function parseTimeHHMM(timeStr) {
   const [hh, mm] = (timeStr || "00:00").split(":").map(Number);
   return { hh: hh || 0, mm: mm || 0 };
 }
-
 function timeMatchesNowForTZ(timeStr, nowTz) {
   const { hh, mm } = parseTimeHHMM(timeStr);
   return nowTz.hour() === hh && nowTz.minute() === mm;
 }
-
 function shouldSendForPartner(schedule, partner, nowTz) {
   if (!timeMatchesNowForTZ(schedule.time, nowTz)) return false;
   const key = `${schedule.id}__${partner.id}`;
@@ -71,7 +65,6 @@ function shouldSendForPartner(schedule, partner, nowTz) {
   const diffDays = nowTz.startOf('day').diff(last.startOf('day'), 'day');
   return diffDays >= (schedule.intervalDays || 1);
 }
-
 function markSentForPartner(scheduleId, partnerId, now) {
   const key = `${scheduleId}__${partnerId}`;
   db.lastSent[key] = now.toISOString();
@@ -80,14 +73,16 @@ function markSentForPartner(scheduleId, partnerId, now) {
 
 const bot = new Bot(TELEGRAM_TOKEN);
 
-// Telegram commands
+// Basic commands
 bot.command("start", ctx => ctx.reply("Inventory Reminder Bot active. You will receive scheduled alerts."));
-bot.command("whoami", ctx => ctx.reply(`Your chat id: ${ctx.chat.id}`));
+bot.command("whoami", ctx => ctx.reply(`${ctx.chat.id}`));
 bot.command("schedules", ctx => {
   reloadDb();
   const list = (db.schedules || []).map(s => `${s.label} (${s.id}) — every ${s.intervalDays} day(s) at ${s.time}`).join("\n");
   ctx.reply("Current schedules:\n" + (list || "No schedules found."));
 });
+
+// Test command: /test <schedule_id>
 bot.command("test", async ctx => {
   const parts = ctx.message.text.split(" ");
   if (parts.length < 2) return ctx.reply("Usage: /test <schedule_id>");
@@ -109,6 +104,8 @@ bot.command("test", async ctx => {
   }
   ctx.reply("Test reminders sent to all partners.");
 });
+
+// Admin command to add/update schedule (only partners listed in db can use)
 bot.command("setschedule", async ctx => {
   const userId = String(ctx.chat.id);
   reloadDb();
@@ -129,14 +126,30 @@ bot.command("setschedule", async ctx => {
   ctx.reply(`Schedule set: ${id} every ${intervalDays} days at ${time}`);
 });
 
+// Optional: staff can send veg list which bot forwards to partners
+bot.command("veggies", async ctx => {
+  // usage: /veggies Tomatoes 10kg, Onions 5kg
+  const text = ctx.message.text.split(" ").slice(1).join(" ").trim();
+  if (!text) return ctx.reply("Usage: /veggies <list of vegetables for tomorrow>");
+  reloadDb();
+  const targets = (db.partners || []).map(p => String(p.id));
+  for (const pid of targets) {
+    try {
+      await bot.api.sendMessage(pid, `🌽 *Vegetables list (from staff):*\n\n${text}`, { parse_mode: "Markdown" });
+    } catch (e) {
+      console.error("veggies forward error", e.message);
+    }
+  }
+  ctx.reply("Vegetable list forwarded to partners.");
+});
+
 (async function main() {
-  // ensure DB is loaded
   reloadDb();
 
-  // start bot polling
+  // start bot (polling)
   bot.start({ onStart: () => console.log("Bot started (polling).") });
 
-  // scheduler loop every 30 seconds
+  // scheduler loop
   setInterval(async () => {
     try {
       reloadDb();
@@ -169,7 +182,7 @@ bot.command("setschedule", async ctx => {
     }
   }, 30 * 1000);
 
-  // small Express server for health-check (so UptimeRobot can ping the URL)
+  // health endpoint for uptime ping
   const app = express();
   app.get("/", (req, res) => res.send("Inventory Reminder Bot running"));
   const PORT = process.env.PORT || 3000;
