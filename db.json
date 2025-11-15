@@ -49,7 +49,10 @@
       "salaryAmount": 0,
       "payday": 1,
       "attendance": {},
-      "joinedAt": null
+      "joinedAt": "2025-11-15",
+      "onHold": false,
+      "holdSince": null,
+      "rank": 0
     }
   ],
   "payments": [],
