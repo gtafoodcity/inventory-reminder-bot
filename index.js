@@ -1,7 +1,7 @@
 // index.js
 // GTA Food City Assistant
 // Organized menu with inline buttons: Employees, Inventory, Reminders, Commands, Admin, Help
-// Includes: inventory, reminders, attendance, payroll, temp-admin, veg check, heartbeat.
+// Includes: inventory, reminders, attendance, payroll, temp-admin, veg check, heartbeat, advanced employee stats.
 
 const { Bot, InlineKeyboard } = require("grammy");
 const fs = require("fs");
@@ -128,7 +128,7 @@ function clearSession(userId) {
   writeDbSync(db);
 }
 
-// admin/roles
+// roles / staff helpers
 function findPartner(userId) {
   reloadDb();
   return db.partners.find(x => String(x.id) === String(userId));
@@ -145,6 +145,8 @@ function upsertStaff(userId, name, role = "staff", tz = "Asia/Kolkata") {
     s.role = role;
     s.tz = tz;
     if (!s.joinedAt) s.joinedAt = dayjs().format("YYYY-MM-DD");
+    if (typeof s.onHold === "undefined") s.onHold = false;
+    if (typeof s.rank === "undefined") s.rank = 0;
     writeDbSync(db);
     return s;
   }
@@ -158,7 +160,10 @@ function upsertStaff(userId, name, role = "staff", tz = "Asia/Kolkata") {
     payday: 1,
     attendance: {},
     payments: [],
-    joinedAt: dayjs().format("YYYY-MM-DD")
+    joinedAt: dayjs().format("YYYY-MM-DD"),
+    onHold: false,
+    holdSince: null,
+    rank: 0
   };
   db.staff.push(s);
   writeDbSync(db);
@@ -177,6 +182,7 @@ function isAdmin(userId) {
   return false;
 }
 
+// inventory helper
 function calcDaysLeft(item) {
   if (!item.dailyUsage || item.dailyUsage <= 0) return Infinity;
   return item.stock / item.dailyUsage;
@@ -200,6 +206,122 @@ const E = {
   cancel: "✖️",
   partial: "🔶"
 };
+
+// attendance stats
+function getAttendanceStats(staff) {
+  const att = staff.attendance || {};
+  const tz = staff.tz || "Asia/Kolkata";
+  const thisMonth = dayjs().tz(tz).format("YYYY-MM");
+
+  let presentTotal = 0;
+  let absentTotal = 0;
+  let leaveTotal = 0;
+  let presentMonth = 0;
+  let absentMonth = 0;
+  let leaveMonth = 0;
+
+  for (const [date, rec] of Object.entries(att)) {
+    const status = rec.status;
+    if (status === "present") {
+      presentTotal++;
+      if (date.startsWith(thisMonth)) presentMonth++;
+    } else if (status === "absent") {
+      absentTotal++;
+      if (date.startsWith(thisMonth)) absentMonth++;
+    } else if (status === "leave") {
+      leaveTotal++;
+      if (date.startsWith(thisMonth)) leaveMonth++;
+    }
+  }
+
+  const workedTotal = presentTotal + absentTotal + leaveTotal;
+  let performance = null;
+  if (workedTotal > 0) performance = presentTotal / workedTotal;
+
+  let ratingText = "Not enough data";
+  if (performance !== null) {
+    if (performance >= 0.9) ratingText = "Excellent (90%+ present)";
+    else if (performance >= 0.8) ratingText = "Good (80–89% present)";
+    else if (performance >= 0.6) ratingText = "Needs attention (60–79% present)";
+    else ratingText = "Critical (<60% present)";
+  }
+
+  // badges
+  let badges = [];
+  if (staff.onHold) badges.push("⏸ On Hold");
+  if (staff.joinedAt) {
+    const daysSinceJoin = dayjs().diff(dayjs(staff.joinedAt), "day");
+    if (daysSinceJoin <= 30) badges.push("🆕 New Joiner");
+  }
+  if (performance !== null) {
+    if (performance >= 0.9) badges.push("🏅 Star Attendance");
+    if (performance < 0.5) badges.push("⚠️ Attendance Risk");
+  }
+  if (staff.rank && staff.rank > 0) {
+    badges.push(`⭐ Rank ${staff.rank}`);
+  }
+  const badgesText = badges.length ? badges.join(" | ") : "—";
+
+  return {
+    presentTotal,
+    absentTotal,
+    leaveTotal,
+    presentMonth,
+    absentMonth,
+    leaveMonth,
+    performance,
+    ratingText,
+    badgesText
+  };
+}
+
+// payment stats
+function getPaymentStats(staff) {
+  reloadDb();
+  const all = db.payments || [];
+  const related = all.filter(p => String(p.staffId) === String(staff.id));
+  let totalPaid = 0;
+  for (const p of related) {
+    const amt = Number(p.amount) || 0;
+    totalPaid += amt;
+  }
+
+  let pending = 0;
+
+  if (staff.salaryAmount && staff.salaryAmount > 0) {
+    if (staff.salaryType === "daily") {
+      // expected = salary * total present (ignoring days after holdSince)
+      const att = staff.attendance || {};
+      let presentCount = 0;
+      for (const [date, rec] of Object.entries(att)) {
+        if (rec.status === "present") {
+          if (staff.onHold && staff.holdSince) {
+            if (dayjs(date).isAfter(dayjs(staff.holdSince))) continue;
+          }
+          presentCount++;
+        }
+      }
+      const expected = presentCount * staff.salaryAmount;
+      pending = expected - totalPaid;
+    } else if (staff.salaryType === "monthly") {
+      if (staff.joinedAt) {
+        const join = dayjs(staff.joinedAt);
+        const now = dayjs();
+        let months = now.diff(join, "month");
+        if (months < 0) months = 0;
+        const expected = months * staff.salaryAmount;
+        pending = expected - totalPaid;
+      }
+    }
+  }
+
+  if (pending < 0) pending = 0;
+
+  return {
+    totalPaid,
+    pending
+  };
+}
 
 // bot + express
 const bot = new Bot(TELEGRAM_TOKEN);
@@ -345,7 +467,7 @@ bot.command("removepartner", async (ctx) => {
   ctx.reply(`Removed partner ${removed.name} (${removed.id}).`);
 });
 
-// inventory commands (still used; called by menu)
+// inventory commands (used from menu)
 bot.command("additem", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Only owners/admins.");
   setSession(ctx.from.id, { action: "additem", step: 1, temp: {} });
@@ -372,7 +494,7 @@ bot.command("inventory", async (ctx) => {
   ctx.reply(lines.join("\n"));
 });
 
-// payroll
+// payroll (command version)
 bot.command("setsalary", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Not authorized.");
   const parts = ctx.message.text.split(" ").slice(1);
@@ -479,7 +601,7 @@ bot.command("myreminders", async (ctx) => {
   ctx.reply(lines.join("\n"));
 });
 
-// MAIN CALLBACK HANDLER (menus + veg + pay + attendance + remdone)
+// MAIN CALLBACK HANDLER (menus + emp + veg + pay + attendance + remdone + admin sections)
 bot.on("callback_query:data", async (ctx) => {
   try {
     const data = ctx.callbackQuery.data || "";
@@ -494,7 +616,8 @@ bot.on("callback_query:data", async (ctx) => {
         const kb = new InlineKeyboard();
         if (db.staff.length) {
           db.staff.forEach(s => {
-            kb.text(`${s.name} (${s.role})`, `emp:view:${s.id}`).row();
+            const statusTag = s.onHold ? " (On hold)" : "";
+            kb.text(`${s.name} (${s.role})${statusTag}`, `emp:view:${s.id}`).row();
           });
         }
         kb.text("➕ Add Employee", "emp:add").row();
@@ -585,7 +708,7 @@ ${E.info} /logout — leave temp admin`;
 `${E.info} *Help*
 
 • Use the main menu buttons to navigate:
-  - Employees → staff profiles, salary, pay cycle.
+  - Employees → staff profiles, salary, pay cycle, ranks.
   - Inventory → items, stock, usage.
   - Reminders → one-time or daily reminders.
   - Commands → full command list.
@@ -616,7 +739,7 @@ For any confusion, contact the owner (Teja).`;
       }
       setSession(uid, { action: "add_employee", step: 1, temp: {} });
       await ctx.answerCallbackQuery();
-      await ctx.api.sendMessage(uid, "Add Employee — Step 1/3: Enter employee name:");
+      await ctx.api.sendMessage(uid, "Add Employee — Step 1/4: Enter employee name:");
       return;
     }
 
@@ -629,24 +752,53 @@ For any confusion, contact the owner (Teja).`;
         return;
       }
       const joined = s.joinedAt || "not set";
+      const salaryType = s.salaryType || "not set";
+      const payCycleText = salaryType === "daily" ? "Daily" : (salaryType === "monthly" ? "Monthly" : "Not set");
+      const statusText = s.onHold ? `On hold since ${s.holdSince || "-"}` : "Active";
+
+      const attStats = getAttendanceStats(s);
+      const payStats = getPaymentStats(s);
+
       const profile =
 `👤 *Employee Profile*
 
 ID: \`${s.id}\`
 Name: *${s.name}*
 Role: *${s.role}*
+Status: *${statusText}*
 Date of joining: *${joined}*
-Salary type: *${s.salaryType || "not set"}*
-Salary amount: *${s.salaryAmount || 0}*
-Payday (if monthly): *${s.payday || "-"}*`;
+
+💵 *Salary*
+Type: *${salaryType}*
+Amount: *${s.salaryAmount || 0}*
+Pay cycle: *${payCycleText}*
+Payday (if monthly): *${s.payday || "-"}*
+Total paid till date: *${payStats.totalPaid}*
+Est. pending to pay: *${payStats.pending}*
+
+📊 *Attendance*
+Total present (from joining): *${attStats.presentTotal}*
+Total absent (from joining): *${attStats.absentTotal}*
+Total leave (from joining): *${attStats.leaveTotal}*
+
+This month present: *${attStats.presentMonth}*
+This month absent: *${attStats.absentMonth}*
+This month leave: *${attStats.leaveMonth}*
+
+Overall performance: *${attStats.ratingText}*
+Badges: *${attStats.badgesText}*`;
+
       const kb = new InlineKeyboard()
-        .text("✏️ Set Role", `emp:setrole:${s.id}`)
+        .text("✏️ Edit", `emp:edit:${s.id}`)
+        .text("⭐ Rank", `emp:rank:${s.id}`)
         .row()
-        .text("💵 Set Salary", `emp:setsalary:${s.id}`)
+        .text(s.onHold ? "▶️ Unhold" : "⏸ Hold", s.onHold ? `emp:unhold:${s.id}` : `emp:hold:${s.id}`)
         .row()
+        .text("📤 Export", `emp:export:${s.id}`)
         .text("❌ Remove", `emp:remove:${s.id}`)
         .row()
         .text("⬅️ Back", "menu:employees");
+
       await ctx.editMessageText(profile, {
         parse_mode: "Markdown",
         reply_markup: kb
@@ -654,27 +806,124 @@ Payday (if monthly): *${s.payday || "-"}*`;
       return await ctx.answerCallbackQuery();
     }
 
-    if (data.startsWith("emp:setrole:")) {
+    if (data.startsWith("emp:edit:")) {
       const id = data.split(":")[2];
       if (!isAdmin(uid)) {
         await ctx.answerCallbackQuery({ text: "Owner/Admin only", show_alert: true });
         return;
       }
-      setSession(uid, { action: "set_role", step: 1, temp: { staffId: id } });
+      setSession(uid, { action: "edit_employee", step: 1, temp: { staffId: id } });
       await ctx.answerCallbackQuery();
-      await ctx.api.sendMessage(uid, "Enter new role for this employee: `staff`, `owner` or `admin`");
+      await ctx.api.sendMessage(
+        uid,
+        "What do you want to edit for this employee? Type: `role`, `salary`, or `join` (date of joining)."
+      );
       return;
     }
 
-    if (data.startsWith("emp:setsalary:")) {
+    if (data.startsWith("emp:rank:")) {
       const id = data.split(":")[2];
       if (!isAdmin(uid)) {
         await ctx.answerCallbackQuery({ text: "Owner/Admin only", show_alert: true });
         return;
       }
-      setSession(uid, { action: "setsalary_flow", step: 1, temp: { staffId: id } });
+      setSession(uid, { action: "rank_employee", step: 1, temp: { staffId: id } });
       await ctx.answerCallbackQuery();
-      await ctx.api.sendMessage(uid, "Set Salary — Step 1/3: Type `daily` or `monthly`");
+      await ctx.api.sendMessage(uid, "Give a rank from 1 to 5 (5 is best):");
+      return;
+    }
+
+    if (data.startsWith("emp:hold:")) {
+      const id = data.split(":")[2];
+      if (!isAdmin(uid)) {
+        await ctx.answerCallbackQuery({ text: "Owner/Admin only", show_alert: true });
+        return;
+      }
+      reloadDb();
+      const s = db.staff.find(st => String(st.id) === String(id));
+      if (!s) {
+        await ctx.answerCallbackQuery({ text: "Employee not found", show_alert: true });
+        return;
+      }
+      s.onHold = true;
+      s.holdSince = dayjs().format("YYYY-MM-DD");
+      writeDbSync(db);
+      logAudit(uid, "emp_hold", id);
+      await ctx.answerCallbackQuery({ text: "Employee put on hold." });
+      await ctx.api.sendMessage(uid, `⏸ ${s.name} is now on hold. No attendance/pay prompts will be sent.`);
+      return;
+    }
+
+    if (data.startsWith("emp:unhold:")) {
+      const id = data.split(":")[2];
+      if (!isAdmin(uid)) {
+        await ctx.answerCallbackQuery({ text: "Owner/Admin only", show_alert: true });
+        return;
+      }
+      reloadDb();
+      const s = db.staff.find(st => String(st.id) === String(id));
+      if (!s) {
+        await ctx.answerCallbackQuery({ text: "Employee not found", show_alert: true });
+        return;
+      }
+      s.onHold = false;
+      writeDbSync(db);
+      logAudit(uid, "emp_unhold", id);
+      await ctx.answerCallbackQuery({ text: "Employee unheld." });
+      await ctx.api.sendMessage(uid, `▶️ ${s.name} is now active again.`);
+      return;
+    }
+
+    if (data.startsWith("emp:export:")) {
+      const id = data.split(":")[2];
+      if (!isAdmin(uid)) {
+        await ctx.answerCallbackQuery({ text: "Owner/Admin only", show_alert: true });
+        return;
+      }
+      reloadDb();
+      const s = db.staff.find(st => String(st.id) === String(id));
+      if (!s) {
+        await ctx.answerCallbackQuery({ text: "Employee not found", show_alert: true });
+        return;
+      }
+      const joined = s.joinedAt || "not set";
+      const attStats = getAttendanceStats(s);
+      const payStats = getPaymentStats(s);
+      const statusText = s.onHold ? `On hold since ${s.holdSince || "-"}` : "Active";
+      const exportText =
+`EXPORT — Employee Data
+========================
+ID: ${s.id}
+Name: ${s.name}
+Role: ${s.role}
+Status: ${statusText}
+Joined: ${joined}
+TZ: ${s.tz || ""}
+
+Salary:
+  Type: ${s.salaryType || "not set"}
+  Amount: ${s.salaryAmount || 0}
+  Payday: ${s.payday || "-"}
+
+Payments:
+  Total paid: ${payStats.totalPaid}
+  Est. pending: ${payStats.pending}
+
+Attendance (overall):
+  Present: ${attStats.presentTotal}
+  Absent: ${attStats.absentTotal}
+  Leave: ${attStats.leaveTotal}
+
+Attendance (this month):
+  Present: ${attStats.presentMonth}
+  Absent: ${attStats.absentMonth}
+  Leave: ${attStats.leaveMonth}
+
+Performance: ${attStats.ratingText}
+Badges: ${attStats.badgesText}
+`;
+      await ctx.answerCallbackQuery({ text: "Export sent in chat." });
+      await ctx.api.sendMessage(uid, "📤 Employee export:\n\n" + exportText);
       return;
     }
 
@@ -921,7 +1170,7 @@ Payday (if monthly): *${s.payday || "-"}*`;
       return;
     }
 
-    // 9) admin menu extras (optional)
+    // 9) admin menu extras
     if (data === "adm:partners") {
       if (!isAdmin(uid)) {
         await ctx.answerCallbackQuery({ text: "Not authorized", show_alert: true });
@@ -956,7 +1205,7 @@ Payday (if monthly): *${s.payday || "-"}*`;
   }
 });
 
-// MESSAGE HANDLER — interactive flows (admin_login, inventory, employees, reminders, pay_partial)
+// MESSAGE HANDLER — interactive flows
 bot.on("message", async (ctx, next) => {
   try {
     const text = (ctx.message.text || "").trim();
@@ -982,22 +1231,36 @@ bot.on("message", async (ctx, next) => {
       return;
     }
 
-    // add_employee flow
+    // add_employee flow (name, chat_id, join date, role)
     if (session && session.action === "add_employee") {
       if (session.step === 1) {
         session.temp = session.temp || {};
         session.temp.name = text;
         session.step = 2;
         setSession(ctx.from.id, session);
-        return await ctx.reply("Add Employee — Step 2/3: Enter employee chat_id (from /whoami):");
+        return await ctx.reply("Add Employee — Step 2/4: Enter employee chat_id (from /whoami):");
       }
       if (session.step === 2) {
         session.temp.chatId = text;
         session.step = 3;
         setSession(ctx.from.id, session);
-        return await ctx.reply("Add Employee — Step 3/3: Enter role: `staff`, `owner`, or `admin`");
+        return await ctx.reply("Add Employee — Step 3/4: Enter Date of joining (YYYY-MM-DD) or type `today`:");
       }
       if (session.step === 3) {
+        let joinedAt;
+        if (text.toLowerCase() === "today") {
+          joinedAt = dayjs().format("YYYY-MM-DD");
+        } else {
+          const parsed = dayjs(text, "YYYY-MM-DD", true);
+          if (!parsed.isValid()) return await ctx.reply("Use format YYYY-MM-DD or type `today`.");
+          joinedAt = parsed.format("YYYY-MM-DD");
+        }
+        session.temp.joinedAt = joinedAt;
+        session.step = 4;
+        setSession(ctx.from.id, session);
+        return await ctx.reply("Add Employee — Step 4/4: Enter role: `staff`, `owner`, or `admin`");
+      }
+      if (session.step === 4) {
         const role = text.toLowerCase();
         if (!["staff", "owner", "admin"].includes(role)) {
           return await ctx.reply("Role must be: `staff`, `owner`, or `admin`");
@@ -1005,6 +1268,7 @@ bot.on("message", async (ctx, next) => {
         reloadDb();
         const id = String(session.temp.chatId);
         const name = session.temp.name;
+        const joinedAt = session.temp.joinedAt || dayjs().format("YYYY-MM-DD");
         // update partners & staff
         if (!db.partners.find(p => String(p.id) === id)) {
           db.partners.push({
@@ -1019,11 +1283,81 @@ bot.on("message", async (ctx, next) => {
           p.role = role === "staff" ? "staff" : role;
         }
         writeDbSync(db);
-        upsertStaff(id, name, role);
-        logAudit(ctx.from.id, "add_employee", `${id}|${name}|${role}`);
+        reloadDb();
+        let s = db.staff.find(st => String(st.id) === id);
+        if (!s) {
+          s = {
+            id,
+            name,
+            role,
+            tz: "Asia/Kolkata",
+            salaryType: "daily",
+            salaryAmount: 0,
+            payday: 1,
+            attendance: {},
+            payments: [],
+            joinedAt,
+            onHold: false,
+            holdSince: null,
+            rank: 0
+          };
+          db.staff.push(s);
+        } else {
+          s.name = name;
+          s.role = role;
+          s.joinedAt = joinedAt;
+          if (typeof s.onHold === "undefined") s.onHold = false;
+          if (typeof s.rank === "undefined") s.rank = 0;
+        }
+        writeDbSync(db);
+        logAudit(ctx.from.id, "add_employee", `${id}|${name}|${role}|${joinedAt}`);
         clearSession(ctx.from.id);
-        return await ctx.reply(`👤 Employee added: ${name} (${id}) role: ${role}`);
+        return await ctx.reply(`👤 Employee added: ${name} (${id}) role: ${role}, joined: ${joinedAt}`);
       }
+    }
+
+    // edit_employee dispatcher
+    if (session && session.action === "edit_employee") {
+      if (session.step === 1) {
+        const choice = text.toLowerCase();
+        if (choice === "role") {
+          session.action = "set_role";
+          session.step = 1;
+          setSession(ctx.from.id, session);
+          return await ctx.reply("Enter new role: `staff`, `owner`, or `admin`");
+        } else if (choice === "salary") {
+          session.action = "setsalary_flow";
+          session.step = 1;
+          setSession(ctx.from.id, session);
+          return await ctx.reply("Set Salary — Step 1/3: Type `daily` or `monthly`");
+        } else if (choice === "join") {
+          session.action = "set_join";
+          session.step = 1;
+          setSession(ctx.from.id, session);
+          return await ctx.reply("Enter new Date of joining (YYYY-MM-DD):");
+        } else {
+          return await ctx.reply("Type: `role`, `salary`, or `join`.");
+        }
+      }
+    }
+
+    // set_join (date of joining edit)
+    if (session && session.action === "set_join") {
+      const staffId = session.temp.staffId;
+      const parsed = dayjs(text, "YYYY-MM-DD", true);
+      if (!parsed.isValid()) return await ctx.reply("Use YYYY-MM-DD format.");
+      const newDate = parsed.format("YYYY-MM-DD");
+      reloadDb();
+      const s = db.staff.find(st => String(st.id) === String(staffId));
+      if (!s) {
+        clearSession(ctx.from.id);
+        return await ctx.reply("Employee not found.");
+      }
+      s.joinedAt = newDate;
+      writeDbSync(db);
+      logAudit(ctx.from.id, "set_join", `${staffId}|${newDate}`);
+      clearSession(ctx.from.id);
+      return await ctx.reply(`Updated Date of joining for ${s.name} to ${newDate}.`);
     }
 
     // set_role flow
@@ -1048,7 +1382,7 @@ bot.on("message", async (ctx, next) => {
       return await ctx.reply(`Role updated: ${staff.name} is now ${role}.`);
     }
 
-    // setsalary_flow (interactive version of setsalary)
+    // setsalary_flow (interactive)
     if (session && session.action === "setsalary_flow") {
       const staffId = session.temp.staffId;
       if (session.step === 1) {
@@ -1102,6 +1436,26 @@ bot.on("message", async (ctx, next) => {
         clearSession(ctx.from.id);
         return await ctx.reply(`💵 Salary set for ${s.name}: monthly ${s.salaryAmount} (payday ${day})`);
       }
+    }
+
+    // rank_employee flow
+    if (session && session.action === "rank_employee") {
+      const staffId = session.temp.staffId;
+      const r = Number(text);
+      if (isNaN(r) || r < 1 || r > 5) {
+        return await ctx.reply("Rank must be a number between 1 and 5.");
+      }
+      reloadDb();
+      const s = db.staff.find(st => String(st.id) === String(staffId));
+      if (!s) {
+        clearSession(ctx.from.id);
+        return await ctx.reply("Employee not found.");
+      }
+      s.rank = r;
+      writeDbSync(db);
+      logAudit(ctx.from.id, "rank_employee", `${staffId}|${r}`);
+      clearSession(ctx.from.id);
+      return await ctx.reply(`⭐ ${s.name} is now ranked ${r}/5.`);
     }
 
     // additem flow
@@ -1498,6 +1852,7 @@ setInterval(async () => {
       const key = `attendance_prompt__${bizNow.format("YYYY-MM-DD")}`;
       if (!db.lastSent[key]) {
         for (const s of db.staff || []) {
+          if (s.onHold) continue;
           try {
             const kb = attendanceKeyboard(s.id);
             for (const p of db.partners) {
@@ -1523,6 +1878,7 @@ setInterval(async () => {
       const key = `paycheck_eod__${bizNow.format("YYYY-MM-DD")}`;
       if (!db.lastSent[key]) {
         for (const s of db.staff || []) {
+          if (s.onHold) continue;
           if (s.salaryType === "daily") {
             for (const p of db.partners) {
               try {
@@ -1545,6 +1901,7 @@ setInterval(async () => {
     // monthly reminders
     const mdaysBefore = Number(db.settings.monthlyReminderDaysBefore || 7);
     for (const s of db.staff || []) {
+      if (s.onHold) continue;
       if (s.salaryType === "monthly") {
         const payday = Number(s.payday || 1);
         let payMoment = dayjs().tz("Asia/Kolkata").date(payday).startOf("day");
