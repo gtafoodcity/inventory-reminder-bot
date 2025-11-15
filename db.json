@@ -48,7 +48,8 @@
       "salaryType": "monthly",
       "salaryAmount": 0,
       "payday": 1,
-      "attendance": {}
+      "attendance": {},
+      "joinedAt": null
     }
   ],
   "payments": [],
