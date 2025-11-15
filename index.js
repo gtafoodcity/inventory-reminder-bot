@@ -1,7 +1,7 @@
 // index.js
 // GTA Food City Assistant
-// Organized menu with inline buttons: Employees, Inventory, Reminders, Commands, Admin, Help
-// Includes: inventory, reminders, attendance, payroll, temp-admin, veg check, heartbeat, advanced employee stats.
+// Menus: Employees, Inventory, Reminders, Commands, Admin, Help
+// Features: inventory, reminders, attendance, payroll, temp-admin, veg check, heartbeat, advanced employee stats.
 
 const { Bot, InlineKeyboard } = require("grammy");
 const fs = require("fs");
@@ -275,51 +275,62 @@ function getAttendanceStats(staff) {
   };
 }
 
-// payment stats
+// NEW: payment stats (month-wise, daily-pay logic)
 function getPaymentStats(staff) {
   reloadDb();
   const all = db.payments || [];
   const related = all.filter(p => String(p.staffId) === String(staff.id));
-  let totalPaid = 0;
-  for (const p of related) {
-    const amt = Number(p.amount) || 0;
-    totalPaid += amt;
-  }
 
-  let pending = 0;
+  // Total paid ever
+  const totalPaid = related.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 
-  if (staff.salaryAmount && staff.salaryAmount > 0) {
-    if (staff.salaryType === "daily") {
-      // expected = salary * total present (ignoring days after holdSince)
-      const att = staff.attendance || {};
-      let presentCount = 0;
-      for (const [date, rec] of Object.entries(att)) {
-        if (rec.status === "present") {
-          if (staff.onHold && staff.holdSince) {
-            if (dayjs(date).isAfter(dayjs(staff.holdSince))) continue;
-          }
-          presentCount++;
-        }
-      }
-      const expected = presentCount * staff.salaryAmount;
-      pending = expected - totalPaid;
-    } else if (staff.salaryType === "monthly") {
-      if (staff.joinedAt) {
-        const join = dayjs(staff.joinedAt);
-        const now = dayjs();
-        let months = now.diff(join, "month");
-        if (months < 0) months = 0;
-        const expected = months * staff.salaryAmount;
-        pending = expected - totalPaid;
-      }
+  const tz = staff.tz || "Asia/Kolkata";
+  const now = dayjs().tz(tz);
+  const monthKey = now.format("YYYY-MM");
+
+  // Paid this month
+  const monthPayments = related.filter(
+    p => dayjs(p.when).tz(tz).format("YYYY-MM") === monthKey
+  );
+  const paidThisMonth = monthPayments.reduce(
+    (sum, p) => sum + (Number(p.amount) || 0),
+    0
+  );
+
+  // Present days this month
+  const att = staff.attendance || {};
+  let presentMonth = 0;
+  for (const [date, rec] of Object.entries(att)) {
+    if (date.startsWith(monthKey) && rec.status === "present") {
+      presentMonth++;
     }
   }
 
-  if (pending < 0) pending = 0;
+  let dailyPay = 0;
+  let earnedThisMonth = 0;
+
+  if (staff.salaryAmount && staff.salaryAmount > 0) {
+    if (staff.salaryType === "daily") {
+      // daily: each present day adds one full daily salary
+      dailyPay = staff.salaryAmount;
+      earnedThisMonth = dailyPay * presentMonth;
+    } else if (staff.salaryType === "monthly") {
+      // monthly: approx daily rate = monthly / days in month
+      const daysInMonth = now.daysInMonth();
+      dailyPay = staff.salaryAmount / daysInMonth;
+      earnedThisMonth = dailyPay * presentMonth;
+    }
+  }
+
+  let pendingThisMonth = Math.max(earnedThisMonth - paidThisMonth, 0);
 
   return {
     totalPaid,
-    pending
+    paidThisMonth,
+    pendingThisMonth,
+    dailyPay,
+    presentMonth,
+    earnedThisMonth
   };
 }
 
@@ -366,6 +377,10 @@ function attendanceKeyboard(staffId) {
     .row()
     .text("On Leave", `att:${staffId}:leave`);
 }
+function inventoryAckKeyboard(itemId) {
+  return new InlineKeyboard()
+    .text("✅ OK / Updated", `invack:${itemId}`);
+}
 
 // /start
 bot.command("start", async (ctx) => {
@@ -411,7 +426,7 @@ bot.command("whoami", (ctx) => {
   ctx.reply(`${id}\nRole: ${baseRole}${tmp}`);
 });
 
-// /admin — temp admin with password 7201
+// /admin — temp admin (password known only to owners)
 bot.command("admin", async (ctx) => {
   setSession(ctx.from.id, { action: "admin_login", step: 1 });
   await ctx.reply("Enter admin password:");
@@ -467,7 +482,7 @@ bot.command("removepartner", async (ctx) => {
   ctx.reply(`Removed partner ${removed.name} (${removed.id}).`);
 });
 
-// inventory commands (used from menu)
+// inventory commands (interactive)
 bot.command("additem", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Only owners/admins.");
   setSession(ctx.from.id, { action: "additem", step: 1, temp: {} });
@@ -601,7 +616,7 @@ bot.command("myreminders", async (ctx) => {
   ctx.reply(lines.join("\n"));
 });
 
-// MAIN CALLBACK HANDLER (menus + emp + veg + pay + attendance + remdone + admin sections)
+// MAIN CALLBACK HANDLER
 bot.on("callback_query:data", async (ctx) => {
   try {
     const data = ctx.callbackQuery.data || "";
@@ -676,7 +691,7 @@ ${E.calendar} /attendance <id> [YYYY-MM] — admin
 ${E.money} /setsalary <id> <daily|monthly> <amount> [payday]
 ${E.money} /pay <id> — mark payment
 ${E.group} /addpartner <id> <name> <role>
-${E.info} /admin — temp admin (password 7201)
+${E.info} /admin — temporary admin (owners only)
 ${E.info} /logout — leave temp admin`;
         await ctx.editMessageText(cmds, {
           parse_mode: "Markdown",
@@ -693,7 +708,7 @@ ${E.info} /logout — leave temp admin`;
         const kb = new InlineKeyboard()
           .text("👥 Partners", "adm:partners")
           .row()
-          .text("🧪 Temp Admin Info", "adm:temp")
+          .text("🔐 Temp Admin Info", "adm:temp")
           .row()
           .text("⬅️ Back", "menu:home");
         await ctx.editMessageText("🛠 *Admin Area*\nOwner/Admin only.", {
@@ -714,7 +729,7 @@ ${E.info} /logout — leave temp admin`;
   - Commands → full command list.
   - Admin → technical/owner tools.
 
-For any confusion, contact the owner (Teja).`;
+For any confusion, contact the owner.`;
         await ctx.editMessageText(msg, {
           parse_mode: "Markdown",
           reply_markup: new InlineKeyboard().text("⬅️ Back", "menu:home")
@@ -751,9 +766,28 @@ For any confusion, contact the owner (Teja).`;
         await ctx.answerCallbackQuery({ text: "Employee not found", show_alert: true });
         return;
       }
+
       const joined = s.joinedAt || "not set";
+
+      // days in company
+      let daysInCompanyText = "—";
+      if (s.joinedAt) {
+        const joinedMoment = dayjs(s.joinedAt, "YYYY-MM-DD", true);
+        if (joinedMoment.isValid()) {
+          const diffDays = dayjs().diff(joinedMoment, "day") + 1;
+          if (diffDays >= 0) {
+            daysInCompanyText = `${diffDays} day(s)`;
+          }
+        }
+      }
+
       const salaryType = s.salaryType || "not set";
-      const payCycleText = salaryType === "daily" ? "Daily" : (salaryType === "monthly" ? "Monthly" : "Not set");
+      const payCycleText =
+        salaryType === "daily"
+          ? "Daily"
+          : salaryType === "monthly"
+          ? "Monthly"
+          : "Not set";
       const statusText = s.onHold ? `On hold since ${s.holdSince || "-"}` : "Active";
 
       const attStats = getAttendanceStats(s);
@@ -767,14 +801,21 @@ Name: *${s.name}*
 Role: *${s.role}*
 Status: *${statusText}*
 Date of joining: *${joined}*
+Days in GTA Food City: *${daysInCompanyText}*
 
 💵 *Salary*
 Type: *${salaryType}*
 Amount: *${s.salaryAmount || 0}*
 Pay cycle: *${payCycleText}*
 Payday (if monthly): *${s.payday || "-"}*
-Total paid till date: *${payStats.totalPaid}*
-Est. pending to pay: *${payStats.pending}*
+Total paid till date (overall): *${payStats.totalPaid}*
+
+This month:
+• Daily pay (approx): *${payStats.dailyPay || 0}*
+• Present days this month: *${payStats.presentMonth}*
+• Earned this month (approx): *${payStats.earnedThisMonth.toFixed(0)}*
+• Paid this month: *${payStats.paidThisMonth}*
+• Pending this month (approx): *${payStats.pendingThisMonth.toFixed(0)}*
 
 📊 *Attendance*
 Total present (from joining): *${attStats.presentTotal}*
@@ -905,9 +946,15 @@ Salary:
   Amount: ${s.salaryAmount || 0}
   Payday: ${s.payday || "-"}
 
-Payments:
+Payments (overall):
   Total paid: ${payStats.totalPaid}
-  Est. pending: ${payStats.pending}
+
+This month (pay view):
+  Daily pay (approx): ${payStats.dailyPay || 0}
+  Present days: ${payStats.presentMonth}
+  Earned this month (approx): ${payStats.earnedThisMonth.toFixed(0)}
+  Paid this month: ${payStats.paidThisMonth}
+  Pending this month (approx): ${payStats.pendingThisMonth.toFixed(0)}
 
 Attendance (overall):
   Present: ${attStats.presentTotal}
@@ -999,6 +1046,28 @@ Badges: ${attStats.badgesText}
       setSession(uid, { action: "setusage", step: 1, temp: {} });
       await ctx.answerCallbackQuery();
       await ctx.api.sendMessage(uid, "Set Usage — Step 1/2: Enter item id:");
+      return;
+    }
+
+    // Inventory acknowledge: stop repeated alerts until stock changes
+    if (data.startsWith("invack:")) {
+      const itemId = data.split(":")[1];
+      reloadDb();
+      const it = db.inventory.find(i => String(i.id) === String(itemId));
+      if (!it) {
+        await ctx.answerCallbackQuery({ text: "Item not found", show_alert: true });
+        return;
+      }
+      it._acknowledged = true;
+      it._ackAt = dayjs().toISOString();
+      writeDbSync(db);
+      logAudit(uid, "inventory_ack", itemId);
+      await ctx.answerCallbackQuery({ text: "Thanks, marked as checked.", show_alert: false });
+      await ctx.api.sendMessage(
+        uid,
+        `${E.ok} Noted — *${it.name}* low-stock alert acknowledged. I won't repeat this alert again unless stock changes.`,
+        { parse_mode: "Markdown" }
+      );
       return;
     }
 
@@ -1195,7 +1264,7 @@ Badges: ${attStats.badgesText}
     if (data === "adm:temp") {
       await ctx.answerCallbackQuery();
       return await ctx.editMessageText(
-        "Temp admin:\n\nUse /admin and password 7201 to become temporary admin.\nUse /logout to return to normal role.",
+        "Temporary admin:\n\nUse /admin to enter admin mode (for technical/config changes). Use /logout to return to your normal role.\n\nAdmin password is shared privately between owners.",
         { reply_markup: new InlineKeyboard().text("⬅️ Back", "menu:admin") }
       );
     }
@@ -1231,7 +1300,7 @@ bot.on("message", async (ctx, next) => {
       return;
     }
 
-    // add_employee flow (name, chat_id, join date, role)
+    // add_employee flow
     if (session && session.action === "add_employee") {
       if (session.step === 1) {
         session.temp = session.temp || {};
@@ -1404,7 +1473,6 @@ bot.on("message", async (ctx, next) => {
           setSession(ctx.from.id, session);
           return await ctx.reply("Set Salary — Step 3/3: Enter payday (1–31):");
         } else {
-          // daily: finish
           reloadDb();
           const s = db.staff.find(x => String(x.id) === String(staffId));
           if (!s) {
@@ -1498,7 +1566,10 @@ bot.on("message", async (ctx, next) => {
           dailyUsage: session.temp.dailyUsage,
           warnDays: 4,
           criticalDays: 2,
-          lastUpdated: dayjs().toISOString()
+          lastUpdated: dayjs().toISOString(),
+          _warned: false,
+          _critical: false,
+          _acknowledged: false
         });
         writeDbSync(db);
         logAudit(ctx.from.id, "additem", `${session.temp.id}|${session.temp.name}|${stock}`);
@@ -1534,6 +1605,10 @@ bot.on("message", async (ctx, next) => {
         it.stock = (it.stock || 0) + Number(session.temp.qty);
         if (unit) it.unit = unit;
         it.lastUpdated = dayjs().toISOString();
+        // stock changed -> reset warning flags
+        it._warned = false;
+        it._critical = false;
+        it._acknowledged = false;
         writeDbSync(db);
         logAudit(ctx.from.id, "purchase", `${it.id}|${session.temp.qty}`);
         clearSession(ctx.from.id);
@@ -1562,6 +1637,10 @@ bot.on("message", async (ctx, next) => {
         }
         it.dailyUsage = u;
         it.lastUpdated = dayjs().toISOString();
+        // usage changed — reset flags so new warnings can be accurate
+        it._warned = false;
+        it._critical = false;
+        it._acknowledged = false;
         writeDbSync(db);
         logAudit(ctx.from.id, "setusage", `${it.id}|${u}`);
         clearSession(ctx.from.id);
@@ -1844,7 +1923,7 @@ setInterval(async () => {
     db.reminders = (db.reminders || []).filter(r => !r.done);
     writeDbSync(db);
 
-    // attendance prompt
+    // attendance prompt (12:00 IST)
     const attTime = db.settings.attendancePromptTime || "12:00";
     const [attH, attM] = attTime.split(":").map(Number);
     const bizNow = dayjs().tz("Asia/Kolkata");
@@ -1871,7 +1950,7 @@ setInterval(async () => {
       }
     }
 
-    // daily pay check
+    // daily pay check (for daily salary)
     const eod = db.settings.endOfDayPaymentCheck || "00:05";
     const [eodH, eodM] = eod.split(":").map(Number);
     if (bizNow.hour() === eodH && bizNow.minute() === eodM) {
@@ -1935,39 +2014,68 @@ setInterval(async () => {
       }
     }
 
-    // inventory checks
+    // inventory checks (with ack)
     reloadDb();
     for (const item of db.inventory || []) {
       const daysLeft = calcDaysLeft(item);
       if (!isFinite(daysLeft)) continue;
-      if (daysLeft <= (item.warnDays || 4) && !item._warned) {
-        const txt =
-          `${E.warn} Low stock: *${item.name}*\n` +
-          `Stock: ${item.stock} ${item.unit}\nDaily: ${item.dailyUsage}\n` +
-          `~${Math.floor(daysLeft)} day(s) left.`;
-        for (const p of db.partners) {
-          await bot.api.sendMessage(String(p.id), txt, { parse_mode: "Markdown" });
+
+      const warnDays = item.warnDays || 4;
+      const criticalDays = item.criticalDays || 2;
+
+      // Low stock
+      if (daysLeft <= warnDays) {
+        if (!item._warned) {
+          const txt =
+            `${E.warn} *Low stock alert*\n\n` +
+            `Item: *${item.name}*\n` +
+            `Stock: ${item.stock} ${item.unit}\n` +
+            `Daily usage: ${item.dailyUsage}\n` +
+            `Approx days left: ~${Math.floor(daysLeft)} day(s)\n\n` +
+            `Please check and update stock if needed.`;
+          for (const p of db.partners) {
+            await bot.api.sendMessage(String(p.id), txt, {
+              parse_mode: "Markdown",
+              reply_markup: inventoryAckKeyboard(item.id)
+            });
+          }
+          item._warned = true;
+          item._acknowledged = false;
+          writeDbSync(db);
+          logAudit("system", "low_warning", `${item.id}|${Math.floor(daysLeft)}d`);
         }
-        item._warned = true;
-        writeDbSync(db);
-        logAudit("system", "low_warning", `${item.id}|${Math.floor(daysLeft)}d`);
       }
-      if (daysLeft <= (item.criticalDays || 2) && !item._critical) {
-        const txt =
-          `${E.critical} CRITICAL: *${item.name}*\n` +
-          `Stock: ${item.stock} ${item.unit}\nImmediate action required.`;
-        for (const p of db.partners) {
-          await bot.api.sendMessage(String(p.id), txt, { parse_mode: "Markdown" });
+
+      // Critical stock
+      if (daysLeft <= criticalDays) {
+        if (!item._critical) {
+          const txt =
+            `${E.critical} *CRITICAL STOCK ALERT*\n\n` +
+            `Item: *${item.name}*\n` +
+            `Stock: ${item.stock} ${item.unit}\n` +
+            `Daily usage: ${item.dailyUsage}\n` +
+            `Approx days left: ~${Math.floor(daysLeft)} day(s)\n\n` +
+            `Immediate action required — arrange purchase now.`;
+          for (const p of db.partners) {
+            await bot.api.sendMessage(String(p.id), txt, {
+              parse_mode: "Markdown",
+              reply_markup: inventoryAckKeyboard(item.id)
+            });
+          }
+          item._critical = true;
+          item._acknowledged = false;
+          writeDbSync(db);
+          logAudit("system", "critical_alert", `${item.id}|${Math.floor(daysLeft)}d`);
         }
-        item._critical = true;
-        writeDbSync(db);
-        logAudit("system", "critical_alert", `${item.id}|${Math.floor(daysLeft)}d`);
       }
-      if (isFinite(daysLeft) && daysLeft > (item.warnDays || 4) && item._warned) {
+
+      // Reset flags when stock recovers
+      if (isFinite(daysLeft) && daysLeft > warnDays && (item._warned || item._acknowledged)) {
         item._warned = false;
+        item._acknowledged = false;
         writeDbSync(db);
       }
-      if (isFinite(daysLeft) && daysLeft > (item.criticalDays || 2) && item._critical) {
+      if (isFinite(daysLeft) && daysLeft > criticalDays && item._critical) {
         item._critical = false;
         writeDbSync(db);
       }
