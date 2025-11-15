@@ -182,10 +182,22 @@ function isAdmin(userId) {
   return false;
 }
 
-// inventory helper
+// inventory helpers
 function calcDaysLeft(item) {
   if (!item.dailyUsage || item.dailyUsage <= 0) return Infinity;
   return item.stock / item.dailyUsage;
+}
+
+// NEW: flexible inventory matcher (for "paner" vs "Paneer/Panner")
+function findInventoryItemFlexible(key) {
+  reloadDb();
+  const k = String(key).trim().toLowerCase();
+  if (!k) return null;
+  return (
+    db.inventory.find(it => String(it.id).toLowerCase() === k) ||
+    db.inventory.find(it => String(it.name).toLowerCase() === k) ||
+    db.inventory.find(it => String(it.name).toLowerCase().includes(k))
+  );
 }
 
 // emojis
@@ -275,7 +287,7 @@ function getAttendanceStats(staff) {
   };
 }
 
-// NEW: payment stats (month-wise, daily-pay logic)
+// payment stats (month-wise, daily-pay logic)
 function getPaymentStats(staff) {
   reloadDb();
   const all = db.payments || [];
@@ -311,11 +323,9 @@ function getPaymentStats(staff) {
 
   if (staff.salaryAmount && staff.salaryAmount > 0) {
     if (staff.salaryType === "daily") {
-      // daily: each present day adds one full daily salary
       dailyPay = staff.salaryAmount;
       earnedThisMonth = dailyPay * presentMonth;
     } else if (staff.salaryType === "monthly") {
-      // monthly: approx daily rate = monthly / days in month
       const daysInMonth = now.daysInMonth();
       dailyPay = staff.salaryAmount / daysInMonth;
       earnedThisMonth = dailyPay * presentMonth;
@@ -414,7 +424,7 @@ bot.command("start", async (ctx) => {
   }
 });
 
-// /whoami — show id + role + temp admin
+// /whoami
 bot.command("whoami", (ctx) => {
   const id = String(ctx.chat.id);
   reloadDb();
@@ -426,13 +436,13 @@ bot.command("whoami", (ctx) => {
   ctx.reply(`${id}\nRole: ${baseRole}${tmp}`);
 });
 
-// /admin — temp admin (password known only to owners)
+// /admin
 bot.command("admin", async (ctx) => {
   setSession(ctx.from.id, { action: "admin_login", step: 1 });
   await ctx.reply("Enter admin password:");
 });
 
-// /logout — remove temp admin
+// /logout
 bot.command("logout", async (ctx) => {
   reloadDb();
   const sess = db.sessions && db.sessions[String(ctx.from.id)];
@@ -447,13 +457,13 @@ bot.command("logout", async (ctx) => {
   await ctx.reply("You were not in temporary admin mode.");
 });
 
-// /cancel — cancel interactive flow (but keep tempAdmin)
+// /cancel
 bot.command("cancel", (ctx) => {
   clearSession(ctx.from.id);
   ctx.reply(`${E.cancel} Cancelled.`);
 });
 
-// add/remove partners (owners/admins)
+// add/remove partners
 bot.command("addpartner", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Not authorized.");
   const parts = ctx.message.text.split(" ").slice(1);
@@ -482,7 +492,7 @@ bot.command("removepartner", async (ctx) => {
   ctx.reply(`Removed partner ${removed.name} (${removed.id}).`);
 });
 
-// inventory commands (interactive)
+// inventory commands
 bot.command("additem", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Only owners/admins.");
   setSession(ctx.from.id, { action: "additem", step: 1, temp: {} });
@@ -491,12 +501,12 @@ bot.command("additem", async (ctx) => {
 bot.command("purchase", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Only owners/admins.");
   setSession(ctx.from.id, { action: "purchase", step: 1, temp: {} });
-  await ctx.reply("Purchase — Step 1/3: Enter item id:");
+  await ctx.reply("Purchase — Step 1/3: Enter item id or name:");
 });
 bot.command("setusage", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Only owners/admins.");
   setSession(ctx.from.id, { action: "setusage", step: 1, temp: {} });
-  await ctx.reply("Set Usage — Step 1/2: Enter item id:");
+  await ctx.reply("Set Usage — Step 1/2: Enter item id or name:");
 });
 bot.command("inventory", async (ctx) => {
   reloadDb();
@@ -509,7 +519,7 @@ bot.command("inventory", async (ctx) => {
   ctx.reply(lines.join("\n"));
 });
 
-// payroll (command version)
+// payroll
 bot.command("setsalary", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Not authorized.");
   const parts = ctx.message.text.split(" ").slice(1);
@@ -530,7 +540,6 @@ bot.command("setsalary", async (ctx) => {
   ctx.reply(`${E.money} Salary set for ${s.name}: ${s.salaryType} ${s.salaryAmount} ${s.salaryType === "monthly" ? `(payday: ${s.payday})` : ""}`);
 });
 
-// pay command
 bot.command("pay", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply("Not authorized.");
   const parts = ctx.message.text.split(" ").slice(1);
@@ -1034,7 +1043,7 @@ Badges: ${attStats.badgesText}
       }
       setSession(uid, { action: "purchase", step: 1, temp: {} });
       await ctx.answerCallbackQuery();
-      await ctx.api.sendMessage(uid, "Purchase — Step 1/3: Enter item id:");
+      await ctx.api.sendMessage(uid, "Purchase — Step 1/3: Enter item id or name:");
       return;
     }
 
@@ -1045,17 +1054,21 @@ Badges: ${attStats.badgesText}
       }
       setSession(uid, { action: "setusage", step: 1, temp: {} });
       await ctx.answerCallbackQuery();
-      await ctx.api.sendMessage(uid, "Set Usage — Step 1/2: Enter item id:");
+      await ctx.api.sendMessage(uid, "Set Usage — Step 1/2: Enter item id or name:");
       return;
     }
 
-    // Inventory acknowledge: stop repeated alerts until stock changes
+    // Inventory acknowledge
     if (data.startsWith("invack:")) {
       const itemId = data.split(":")[1];
       reloadDb();
       const it = db.inventory.find(i => String(i.id) === String(itemId));
       if (!it) {
         await ctx.answerCallbackQuery({ text: "Item not found", show_alert: true });
+        return;
+      }
+      if (it._acknowledged) {
+        await ctx.answerCallbackQuery({ text: "Already acknowledged.", show_alert: false });
         return;
       }
       it._acknowledged = true;
@@ -1065,7 +1078,7 @@ Badges: ${attStats.badgesText}
       await ctx.answerCallbackQuery({ text: "Thanks, marked as checked.", show_alert: false });
       await ctx.api.sendMessage(
         uid,
-        `${E.ok} Noted — *${it.name}* low-stock alert acknowledged. I won't repeat this alert again unless stock changes.`,
+        `${E.ok} Noted — *${it.name}* low-stock alert acknowledged. I won't repeat this alert again unless stock/usage changes.`,
         { parse_mode: "Markdown" }
       );
       return;
@@ -1338,7 +1351,6 @@ bot.on("message", async (ctx, next) => {
         const id = String(session.temp.chatId);
         const name = session.temp.name;
         const joinedAt = session.temp.joinedAt || dayjs().format("YYYY-MM-DD");
-        // update partners & staff
         if (!db.partners.find(p => String(p.id) === id)) {
           db.partners.push({
             id,
@@ -1410,7 +1422,7 @@ bot.on("message", async (ctx, next) => {
       }
     }
 
-    // set_join (date of joining edit)
+    // set_join
     if (session && session.action === "set_join") {
       const staffId = session.temp.staffId;
       const parsed = dayjs(text, "YYYY-MM-DD", true);
@@ -1451,7 +1463,7 @@ bot.on("message", async (ctx, next) => {
       return await ctx.reply(`Role updated: ${staff.name} is now ${role}.`);
     }
 
-    // setsalary_flow (interactive)
+    // setsalary_flow
     if (session && session.action === "setsalary_flow") {
       const staffId = session.temp.staffId;
       if (session.step === 1) {
@@ -1578,10 +1590,10 @@ bot.on("message", async (ctx, next) => {
       }
     }
 
-    // purchase flow
+    // purchase flow (with flexible item matching)
     if (session && session.action === "purchase") {
       if (session.step === 1) {
-        session.temp.id = text;
+        session.temp.id = text; // could be id or name
         session.step = 2;
         setSession(ctx.from.id, session);
         return await ctx.reply("Step 2/3: Enter quantity (number).");
@@ -1597,15 +1609,15 @@ bot.on("message", async (ctx, next) => {
       if (session.step === 3) {
         const unit = text === "same" ? null : text;
         reloadDb();
-        const it = db.inventory.find(x => String(x.id) === String(session.temp.id));
+        const it = findInventoryItemFlexible(session.temp.id);
         if (!it) {
           clearSession(ctx.from.id);
-          return await ctx.reply("Item not found.");
+          return await ctx.reply("Item not found. Tip: use /inventory to see IDs & names.");
         }
         it.stock = (it.stock || 0) + Number(session.temp.qty);
         if (unit) it.unit = unit;
         it.lastUpdated = dayjs().toISOString();
-        // stock changed -> reset warning flags
+        // stock changed -> reset warning/critical/ack flags
         it._warned = false;
         it._critical = false;
         it._acknowledged = false;
@@ -1618,10 +1630,10 @@ bot.on("message", async (ctx, next) => {
       }
     }
 
-    // setusage flow
+    // setusage flow (with flexible matching)
     if (session && session.action === "setusage") {
       if (session.step === 1) {
-        session.temp.id = text;
+        session.temp.id = text; // can be id or name
         session.step = 2;
         setSession(ctx.from.id, session);
         return await ctx.reply("Step 2/2: Enter daily usage (number).");
@@ -1630,10 +1642,10 @@ bot.on("message", async (ctx, next) => {
         const u = Number(text);
         if (isNaN(u)) return await ctx.reply("Enter number.");
         reloadDb();
-        const it = db.inventory.find(x => String(x.id) === String(session.temp.id));
+        const it = findInventoryItemFlexible(session.temp.id);
         if (!it) {
           clearSession(ctx.from.id);
-          return await ctx.reply("Item not found.");
+          return await ctx.reply("Item not found. Tip: use /inventory to see IDs & names.");
         }
         it.dailyUsage = u;
         it.lastUpdated = dayjs().toISOString();
@@ -1782,7 +1794,7 @@ setInterval(async () => {
     const partners = db.partners || [];
     const schedules = db.schedules || [];
 
-    // Schedules (veg + others)
+    // Schedules
     for (const s of schedules) {
       for (const p of partners) {
         try {
@@ -1888,7 +1900,7 @@ setInterval(async () => {
       }
     }
 
-    // reminders (once/daily)
+    // reminders
     const now = dayjs();
     for (const r of db.reminders || []) {
       if (r.done) continue;
@@ -1950,7 +1962,7 @@ setInterval(async () => {
       }
     }
 
-    // daily pay check (for daily salary)
+    // daily pay check
     const eod = db.settings.endOfDayPaymentCheck || "00:05";
     const [eodH, eodM] = eod.split(":").map(Number);
     if (bizNow.hour() === eodH && bizNow.minute() === eodM) {
@@ -2014,41 +2026,30 @@ setInterval(async () => {
       }
     }
 
-    // inventory checks (with ack)
+    // INVENTORY CHECKS (low + critical) — with ack + no double alert
     reloadDb();
     for (const item of db.inventory || []) {
       const daysLeft = calcDaysLeft(item);
-      if (!isFinite(daysLeft)) continue;
-
       const warnDays = item.warnDays || 4;
       const criticalDays = item.criticalDays || 2;
 
-      // Low stock
-      if (daysLeft <= warnDays) {
-        if (!item._warned) {
-          const txt =
-            `${E.warn} *Low stock alert*\n\n` +
-            `Item: *${item.name}*\n` +
-            `Stock: ${item.stock} ${item.unit}\n` +
-            `Daily usage: ${item.dailyUsage}\n` +
-            `Approx days left: ~${Math.floor(daysLeft)} day(s)\n\n` +
-            `Please check and update stock if needed.`;
-          for (const p of db.partners) {
-            await bot.api.sendMessage(String(p.id), txt, {
-              parse_mode: "Markdown",
-              reply_markup: inventoryAckKeyboard(item.id)
-            });
-          }
-          item._warned = true;
+      // if dailyUsage is 0 or negative => skip alerts
+      if (!isFinite(daysLeft)) continue;
+
+      // if stock recovered above warn threshold => reset all flags
+      if (daysLeft > warnDays) {
+        if (item._warned || item._critical || item._acknowledged) {
+          item._warned = false;
+          item._critical = false;
           item._acknowledged = false;
           writeDbSync(db);
-          logAudit("system", "low_warning", `${item.id}|${Math.floor(daysLeft)}d`);
         }
+        continue;
       }
 
-      // Critical stock
+      // CRITICAL has higher priority than WARN
       if (daysLeft <= criticalDays) {
-        if (!item._critical) {
+        if (!item._critical && !item._acknowledged) {
           const txt =
             `${E.critical} *CRITICAL STOCK ALERT*\n\n` +
             `Item: *${item.name}*\n` +
@@ -2063,21 +2064,29 @@ setInterval(async () => {
             });
           }
           item._critical = true;
-          item._acknowledged = false;
+          item._warned = true; // also treat as warned
           writeDbSync(db);
           logAudit("system", "critical_alert", `${item.id}|${Math.floor(daysLeft)}d`);
         }
-      }
-
-      // Reset flags when stock recovers
-      if (isFinite(daysLeft) && daysLeft > warnDays && (item._warned || item._acknowledged)) {
-        item._warned = false;
-        item._acknowledged = false;
-        writeDbSync(db);
-      }
-      if (isFinite(daysLeft) && daysLeft > criticalDays && item._critical) {
-        item._critical = false;
-        writeDbSync(db);
+      } else if (daysLeft <= warnDays) {
+        if (!item._warned && !item._acknowledged) {
+          const txt =
+            `${E.warn} *Low stock alert*\n\n` +
+            `Item: *${item.name}*\n` +
+            `Stock: ${item.stock} ${item.unit}\n` +
+            `Daily usage: ${item.dailyUsage}\n` +
+            `Approx days left: ~${Math.floor(daysLeft)} day(s)\n\n` +
+            `Please check and update stock if needed.`;
+          for (const p of db.partners) {
+            await bot.api.sendMessage(String(p.id), txt, {
+              parse_mode: "Markdown",
+              reply_markup: inventoryAckKeyboard(item.id)
+            });
+          }
+          item._warned = true;
+          writeDbSync(db);
+          logAudit("system", "low_warning", `${item.id}|${Math.floor(daysLeft)}d`);
+        }
       }
     }
 
